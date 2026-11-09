@@ -455,8 +455,10 @@ function initAudio(){
   warmTTS();
   var AC = window.AudioContext || window.webkitAudioContext;
   if (!AC) return;
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch(e){}
   try { audioCtx = new AC(); } catch(e){ audioCtx = null; return; }
   masterGain = audioCtx.createGain(); masterGain.gain.value = 0.9; masterGain.connect(audioCtx.destination);
+  setTimeout(function(){ Object.keys(voiceURLs).forEach(decodeVoice); }, 60);
   sfxGain = audioCtx.createGain(); sfxGain.gain.value = 0.75; sfxGain.connect(masterGain);
   musicGain = audioCtx.createGain(); musicGain.gain.value = 0; musicGain.connect(masterGain);
   startMusic();
@@ -533,8 +535,39 @@ function preloadAudio(key){
     a.src = voiceURLs[key] || ('audio/' + encodeURIComponent(key) + '.mp3'); a.load(); rec.el = a;
   } catch(e){ rec.ok = false; missingAudio[key] = true; }
 }
-function stopAllFiles(){ Object.keys(audioCache).forEach(function(k){ var r = audioCache[k]; if (r.el && r.ok){ try { r.el.pause(); } catch(e){} } }); }
+/* Suara guru dimainkan melalui AudioContext: stabil di iPhone/Android walaupun dimainkan automatik */
+var voiceBuf = {}, voiceSrc = null;
+function decodeVoice(key){
+  var u = voiceURLs[key];
+  if (!u || !audioCtx || !window.fetch) return null;
+  if (voiceBuf[u]) return voiceBuf[u];
+  voiceBuf[u] = fetch(u).then(function(r){ return r.arrayBuffer(); }).then(function(ab){
+    return new Promise(function(res){
+      var ok = function(b){ res(b); }, bad = function(){ res(null); };
+      try { var p = audioCtx.decodeAudioData(ab, ok, bad); if (p && p.then) p.then(ok, bad); } catch(e){ res(null); }
+    });
+  }).catch(function(){ return null; });
+  return voiceBuf[u];
+}
+function stopVoiceSrc(){ if (voiceSrc){ try { voiceSrc.onended = null; voiceSrc.stop(); } catch(e){} voiceSrc = null; } }
+function playBuffer(buf){
+  return new Promise(function(res){
+    try { if (audioCtx.state === 'suspended') audioCtx.resume(); } catch(e){}
+    stopVoiceSrc();
+    var s = audioCtx.createBufferSource(); s.buffer = buf; s.connect(masterGain || audioCtx.destination);
+    var done = false; function fin(){ if (done) return; done = true; if (voiceSrc === s) voiceSrc = null; res(true); }
+    s.onended = fin; voiceSrc = s;
+    try { s.start(0); } catch(e){ fin(); return; }
+    setTimeout(fin, buf.duration * 1000 + 500);
+  });
+}
 function playFile(key){
+  var pb = decodeVoice(key);
+  if (!pb) return playFileEl(key);
+  return pb.then(function(buf){ return buf ? playBuffer(buf) : playFileEl(key); });
+}
+function stopAllFiles(){ stopVoiceSrc(); Object.keys(audioCache).forEach(function(k){ var r = audioCache[k]; if (r.el && r.ok){ try { r.el.pause(); } catch(e){} } }); }
+function playFileEl(key){
   return new Promise(function(res){
     if (missingAudio[key]) { res(false); return; }
     preloadAudio(key);
@@ -545,7 +578,7 @@ function playFile(key){
     a.onended = function(){ fin(true); };
     a.onerror = function(){ missingAudio[key] = true; rec.ok = false; fin(false); };
     try { a.currentTime = 0; } catch(e){}
-    var p = a.play(); if (p && p.catch) p.catch(function(){ if (rec.ok !== true){ missingAudio[key] = true; rec.ok = false; } fin(false); });
+    var p = a.play(); if (p && p.catch) p.catch(function(err){ if (rec.ok !== true && !(err && err.name === 'NotAllowedError')){ missingAudio[key] = true; rec.ok = false; } fin(false); });
     setTimeout(function(){ fin(true); }, 6000);
   });
 }
